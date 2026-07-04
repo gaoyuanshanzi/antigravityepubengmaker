@@ -1,92 +1,40 @@
 "use client";
 
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useCallback } from "react";
 import mammoth from "mammoth";
 import { generateEpub } from "../utils/epubBuilder";
 
-// Types
 interface Chapter {
   id: number;
   title: string;
-  originalText: string;
-  refinedText?: string;
-  summary?: string;
-  status: "pending" | "processing" | "completed" | "failed";
-}
-
-interface LogMessage {
-  time: string;
-  text: string;
-  type: "info" | "success" | "warning" | "error";
+  content: string;
+  wordCount: number;
 }
 
 export default function Home() {
-  // Auth state
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
+  // Auth
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [adminId, setAdminId] = useState("");
   const [adminPw, setAdminPw] = useState("");
   const [loginError, setLoginError] = useState("");
 
-  // Settings state
-  const [apiKey, setApiKey] = useState("");
-  const [modelName, setModelName] = useState("gemini-2.0-flash");
-  const [chapterDelay, setChapterDelay] = useState(8);
-  const [customPrompt, setCustomPrompt] = useState(
-    "Ensure grammar, style, and tone are polished. Adjust sentence flow to feel professional yet captivating. Retain specific formatting like line breaks or indentations if relevant."
-  );
-
-  // Book Metadata
-  const [bookTitle, setBookTitle] = useState("Untitled Novel");
+  // Book metadata
+  const [bookTitle, setBookTitle] = useState("Untitled");
   const [author, setAuthor] = useState("Becko Hyun");
   const [publisher, setPublisher] = useState("Evvia Publishing");
   const [contact, setContact] = useState("evviacorp@gmail.com");
 
-  // Workflow state
+  // Workflow
   const [file, setFile] = useState<File | null>(null);
   const [rawText, setRawText] = useState("");
   const [splitPattern, setSplitPattern] = useState(
     "(?=^Chapter\\s+\\d+|^\\bChapter\\b\\s+[IVXLCDM]+|^제\\s*\\d+\\s*[장화])"
   );
   const [chapters, setChapters] = useState<Chapter[]>([]);
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [currentChapterIndex, setCurrentChapterIndex] = useState(-1);
-  const [logs, setLogs] = useState<LogMessage[]>([]);
-  const [showSettings, setShowSettings] = useState(false);
-  const [selectedPreviewChapter, setSelectedPreviewChapter] = useState<Chapter | null>(null);
-
-  // Timer
-  const [elapsedTime, setElapsedTime] = useState(0);
-  const timerRef = useRef<NodeJS.Timeout | null>(null);
-  const logEndRef = useRef<HTMLDivElement | null>(null);
-
-  // Load saved settings on mount
-  useEffect(() => {
-    const auth = sessionStorage.getItem("authenticated");
-    if (auth === "true") setIsAuthenticated(true);
-    const storedKey = localStorage.getItem("gemini_api_key");
-    if (storedKey) setApiKey(storedKey);
-  }, []);
-
-  // Auto-scroll logs
-  useEffect(() => {
-    logEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [logs]);
-
-  // Elapsed timer while processing
-  useEffect(() => {
-    if (isProcessing) {
-      setElapsedTime(0);
-      timerRef.current = setInterval(() => setElapsedTime(prev => prev + 1), 1000);
-    } else {
-      if (timerRef.current) clearInterval(timerRef.current);
-    }
-    return () => { if (timerRef.current) clearInterval(timerRef.current); };
-  }, [isProcessing]);
-
-  const addLog = (text: string, type: "info" | "success" | "warning" | "error" = "info") => {
-    const time = new Date().toLocaleTimeString();
-    setLogs(prev => [...prev, { time, text, type }]);
-  };
+  const [isBuilding, setIsBuilding] = useState(false);
+  const [selectedChapter, setSelectedChapter] = useState<Chapter | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
+  const [status, setStatus] = useState("");
 
   const handleLogin = (e: React.FormEvent) => {
     e.preventDefault();
@@ -94,655 +42,407 @@ export default function Home() {
       sessionStorage.setItem("authenticated", "true");
       setIsAuthenticated(true);
     } else {
-      setLoginError("Invalid Administrator ID or Password.");
+      setLoginError("Invalid ID or Password.");
     }
   };
 
-  const handleSaveSettings = () => {
-    localStorage.setItem("gemini_api_key", apiKey);
-    setShowSettings(false);
-    addLog("Settings saved successfully.", "success");
-  };
-
-  // Parse .docx file
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files || files.length === 0) return;
-    const uploadedFile = files[0];
-    setFile(uploadedFile);
-    addLog(`Reading file: ${uploadedFile.name}...`, "info");
-    try {
-      const arrayBuffer = await uploadedFile.arrayBuffer();
-      const result = await mammoth.extractRawText({ arrayBuffer });
-      const text = result.value;
-      setRawText(text);
-      const firstLine = text.split("\n").map(l => l.trim()).find(l => l.length > 0) || "Untitled Novel";
-      setBookTitle(firstLine.substring(0, 80));
-      addLog(`File parsed. Total characters: ${text.length.toLocaleString()}`, "success");
-      splitManuscript(text, splitPattern);
-    } catch (err: any) {
-      addLog(`Failed to parse docx: ${err.message}`, "error");
-    }
-  };
-
-  // Split text into chapters
-  const splitManuscript = (text: string, pattern: string) => {
-    if (!text) return;
-    addLog(`Splitting using pattern: "${pattern}"...`, "info");
+  const splitManuscript = useCallback((text: string, pattern: string) => {
     try {
       const regex = new RegExp(pattern, "m");
       const rawChunks = text.split(regex);
-      const parsedChapters: Chapter[] = [];
+      const result: Chapter[] = [];
       let counter = 1;
-      rawChunks.forEach(chunk => {
+      rawChunks.forEach((chunk) => {
         const trimmed = chunk.trim();
         if (!trimmed) return;
-        const lines = trimmed.split("\n").map(l => l.trim()).filter(l => l.length > 0);
-        const title = lines.length > 0 && lines[0].length < 100 ? lines[0] : `Chapter ${counter}`;
-        parsedChapters.push({ id: counter, title, originalText: trimmed, status: "pending" });
+        const lines = trimmed.split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
+        const title =
+          lines.length > 0 && lines[0].length < 120 ? lines[0] : `Chapter ${counter}`;
+        result.push({
+          id: counter,
+          title,
+          content: trimmed,
+          wordCount: trimmed.split(/\s+/).length,
+        });
         counter++;
       });
-      setChapters(parsedChapters);
-      addLog(`Detected ${parsedChapters.length} chapters.`, "success");
-    } catch (err: any) {
-      addLog(`Invalid regex pattern: ${err.message}`, "error");
+      setChapters(result);
+    } catch {
+      // invalid regex — keep previous chapters
+    }
+  }, []);
+
+  const processFile = async (f: File) => {
+    setFile(f);
+    setStatus("Parsing document...");
+    try {
+      const arrayBuffer = await f.arrayBuffer();
+      const result = await mammoth.extractRawText({ arrayBuffer });
+      const text = result.value;
+      setRawText(text);
+
+      // Auto-detect title from first non-empty line
+      const firstLine = text.split("\n").map((l) => l.trim()).find((l) => l.length > 0);
+      if (firstLine) setBookTitle(firstLine.substring(0, 100));
+
+      splitManuscript(text, splitPattern);
+      setStatus("");
+    } catch {
+      setStatus("Failed to parse document. Please check the file.");
     }
   };
 
-  const handlePatternChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const newPattern = e.target.value;
+  const handleFileInput = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0];
+    if (f) await processFile(f);
+  };
+
+  const handleDrop = async (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+    const f = e.dataTransfer.files?.[0];
+    if (f && f.name.endsWith(".docx")) await processFile(f);
+  };
+
+  const handlePatternChange = (newPattern: string) => {
     setSplitPattern(newPattern);
     if (rawText) splitManuscript(rawText, newPattern);
   };
 
-  // Countdown sleep with log
-  const countdownSleep = async (seconds: number, reason: string) => {
-    for (let s = seconds; s > 0; s--) {
-      addLog(`⏳ ${reason} — resuming in ${s}s...`, "warning");
-      await new Promise(r => setTimeout(r, 1000));
-    }
-  };
-
-  // Main processing pipeline
-  const startProcessingPipeline = async () => {
-    if (chapters.length === 0) {
-      addLog("No chapters found. Please upload a file first.", "warning");
-      return;
-    }
-    setIsProcessing(true);
-    addLog("Starting sequential refinement pipeline...", "info");
-
-    let previousSummary = "";
-    const updatedChapters = [...chapters];
-
-    for (let i = 0; i < updatedChapters.length; i++) {
-      setCurrentChapterIndex(i);
-      const ch = updatedChapters[i];
-      addLog(`[Chapter ${i + 1}/${updatedChapters.length}] Starting refinement...`, "info");
-      updatedChapters[i] = { ...ch, status: "processing" };
-      setChapters([...updatedChapters]);
-
-      let chapterSuccess = false;
-      let retryCount = 0;
-      const maxClientRetries = 4;
-
-      while (!chapterSuccess && retryCount <= maxClientRetries) {
-        try {
-          const res = await fetch("/api/refine", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              chapterText: ch.originalText,
-              previousSummary,
-              customPrompt,
-              apiKey,
-              modelName,
-            }),
-          });
-
-          if (res.status === 429) {
-            const waitSec = 30 * Math.pow(2, retryCount);
-            addLog(`[Chapter ${i + 1}] ⚠️ Quota exceeded (429). Auto-retry ${retryCount + 1}/${maxClientRetries}.`, "warning");
-            await countdownSleep(waitSec, "Rate limit — waiting for Gemini quota reset");
-            retryCount++;
-            continue;
-          }
-
-          if (!res.ok) {
-            const errData = await res.json();
-            throw new Error(errData.error || `HTTP error ${res.status}`);
-          }
-
-          const data = await res.json();
-          previousSummary = data.summary || previousSummary;
-          updatedChapters[i].refinedText = data.refinedText;
-          updatedChapters[i].summary = data.summary;
-          updatedChapters[i].status = "completed";
-          setChapters([...updatedChapters]);
-          addLog(`[Chapter ${i + 1}/${updatedChapters.length}] ✓ Done. Summary: "${(data.summary || "").substring(0, 80)}..."`, "success");
-          chapterSuccess = true;
-
-        } catch (err: any) {
-          updatedChapters[i].status = "failed";
-          setChapters([...updatedChapters]);
-          addLog(`[Chapter ${i + 1}] Failed: ${err.message}`, "error");
-          addLog("Pipeline halted. Please check the error and retry.", "error");
-          setIsProcessing(false);
-          return;
-        }
-      }
-
-      if (!chapterSuccess) {
-        updatedChapters[i].status = "failed";
-        setChapters([...updatedChapters]);
-        addLog(`[Chapter ${i + 1}] Exhausted all retries. Pipeline halted.`, "error");
-        setIsProcessing(false);
-        return;
-      }
-
-      // Delay between chapters
-      if (i < updatedChapters.length - 1 && chapterDelay > 0) {
-        addLog(`⏸️ Waiting ${chapterDelay}s before next chapter...`, "info");
-        await new Promise(r => setTimeout(r, chapterDelay * 1000));
-      }
-    }
-
-    addLog("All chapters refined successfully!", "success");
-    setIsProcessing(false);
-  };
-
-  // Compile and download EPUB
-  const handleDownloadEpub = async () => {
-    addLog("Compiling EPUB package...", "info");
+  const handleDownload = async () => {
+    if (chapters.length === 0) return;
+    setIsBuilding(true);
+    setStatus("Building EPUB...");
     try {
-      const epubChapters = chapters.map(ch => ({
-        title: ch.title,
-        content: ch.refinedText || ch.originalText,
-      }));
-      const blob = await generateEpub({ title: bookTitle, author, publisher, contact }, epubChapters);
+      const blob = await generateEpub(
+        { title: bookTitle, author, publisher, contact },
+        chapters.map((ch) => ({ title: ch.title, content: ch.content }))
+      );
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `${bookTitle.toLowerCase().replace(/[^a-z0-9]+/g, "_")}.epub`;
+      a.download = `${bookTitle.toLowerCase().replace(/[^a-z0-9]+/g, "_") || "ebook"}.epub`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
-      addLog("EPUB downloaded successfully!", "success");
-    } catch (err: any) {
-      addLog(`Failed to compile EPUB: ${err.message}`, "error");
+      setStatus("Download complete!");
+      setTimeout(() => setStatus(""), 3000);
+    } catch {
+      setStatus("Failed to build EPUB. Please try again.");
+    } finally {
+      setIsBuilding(false);
     }
   };
 
-  const formatSeconds = (s: number) =>
-    `${Math.floor(s / 60).toString().padStart(2, "0")}:${(s % 60).toString().padStart(2, "0")}`;
+  const totalWords = chapters.reduce((s, c) => s + c.wordCount, 0);
 
-  const completedCount = chapters.filter(c => c.status === "completed").length;
-  const progressPercent = chapters.length > 0 ? Math.round((completedCount / chapters.length) * 100) : 0;
-
-  // ── LOGIN SCREEN ──────────────────────────────────────────────────────────
+  // ── LOGIN ─────────────────────────────────────────────────────────────────
   if (!isAuthenticated) {
     return (
       <div className="login-wrapper">
-        <div className="glass login-card">
-          <div className="logo-header">
-            <span className="logo-badge">Evvia Publishing</span>
-            <h1>EPUB Book Maker</h1>
-            <p>Administrator access required to continue.</p>
+        <div className="login-card glass">
+          <div className="login-brand">
+            <span className="badge">Evvia Publishing</span>
+            <h1>EPUB Converter</h1>
+            <p>Admin access required</p>
           </div>
           <form onSubmit={handleLogin} className="login-form">
-            <div className="input-group">
-              <label>Administrator ID</label>
-              <input type="text" className="input-field" value={adminId}
-                onChange={e => setAdminId(e.target.value)} placeholder="Enter ID" required />
+            <div className="field">
+              <label>ID</label>
+              <input className="input-field" type="text" value={adminId}
+                onChange={(e) => setAdminId(e.target.value)} placeholder="admin" required />
             </div>
-            <div className="input-group">
+            <div className="field">
               <label>Password</label>
-              <input type="password" className="input-field" value={adminPw}
-                onChange={e => setAdminPw(e.target.value)} placeholder="Enter password" required />
+              <input className="input-field" type="password" value={adminPw}
+                onChange={(e) => setAdminPw(e.target.value)} placeholder="••••••••" required />
             </div>
-            {loginError && <p className="error-text">{loginError}</p>}
-            <button type="submit" className="btn-primary" style={{ width: "100%", marginTop: "12px" }}>
-              Unlock System
-            </button>
+            {loginError && <p className="err">{loginError}</p>}
+            <button type="submit" className="btn-primary">Unlock →</button>
           </form>
         </div>
 
         <style jsx>{`
           .login-wrapper {
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            padding: 24px;
+            min-height: 100vh; display: flex; align-items: center;
+            justify-content: center; padding: 24px;
           }
-          .login-card { max-width: 420px; width: 100%; padding: 40px; }
-          .logo-header { text-align: center; margin-bottom: 32px; }
-          .logo-badge {
-            background: linear-gradient(135deg, var(--primary) 0%, var(--secondary) 100%);
-            color: #050508; font-size: 11px; font-weight: 800; padding: 4px 10px;
-            border-radius: 9999px; text-transform: uppercase; letter-spacing: 1px;
-            display: inline-block; margin-bottom: 12px;
+          .login-card { max-width: 380px; width: 100%; padding: 40px; }
+          .login-brand { text-align: center; margin-bottom: 32px; }
+          .badge {
+            display: inline-block; background: linear-gradient(135deg, var(--primary), var(--secondary));
+            color: #050508; font-size: 10px; font-weight: 800; letter-spacing: 1px;
+            text-transform: uppercase; padding: 4px 12px; border-radius: 999px; margin-bottom: 14px;
           }
-          h1 { font-size: 24px; letter-spacing: -0.5px; margin-bottom: 8px; font-weight: 700; }
+          h1 { font-size: 26px; font-weight: 700; margin-bottom: 8px; }
           p { color: var(--foreground-muted); font-size: 14px; }
-          .login-form { display: flex; flex-direction: column; gap: 20px; }
-          .input-group { display: flex; flex-direction: column; gap: 8px; }
-          label { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--foreground-muted); }
-          .error-text { color: var(--danger); font-size: 13px; text-align: center; margin: 0; }
+          .login-form { display: flex; flex-direction: column; gap: 18px; }
+          .field { display: flex; flex-direction: column; gap: 6px; }
+          label { font-size: 11px; font-weight: 600; color: var(--foreground-muted); text-transform: uppercase; letter-spacing: .5px; }
+          .err { color: var(--danger); font-size: 13px; text-align: center; }
+          .btn-primary { margin-top: 4px; }
         `}</style>
       </div>
     );
   }
 
-  // ── DASHBOARD ─────────────────────────────────────────────────────────────
+  // ── MAIN APP ───────────────────────────────────────────────────────────────
   return (
-    <div className="dashboard-layout">
+    <div className="app">
       {/* Header */}
-      <header className="glass header-bar">
-        <div className="container header-content">
-          <div className="brand-logo">
-            <span className="logo-badge">Evvia Pub</span>
-            <h2>EPUB English Book Maker</h2>
+      <header className="glass topbar">
+        <div className="inner topbar-inner">
+          <div className="topbar-brand">
+            <span className="badge sm">Evvia Pub</span>
+            <span className="topbar-title">EPUB Converter</span>
           </div>
-          <div className="header-actions">
-            <button className="btn-secondary" onClick={() => setShowSettings(true)}>⚙️ Settings</button>
-            <button className="btn-secondary" onClick={() => {
-              sessionStorage.removeItem("authenticated");
-              setIsAuthenticated(false);
-            }}>Logout</button>
-          </div>
+          <button className="btn-ghost" onClick={() => {
+            sessionStorage.removeItem("authenticated");
+            setIsAuthenticated(false);
+          }}>Logout</button>
         </div>
       </header>
 
-      <main className="container main-content">
-        {/* LEFT COLUMN */}
-        <div className="control-col">
+      <main className="inner main-grid">
 
-          {/* Book Metadata */}
-          <section className="glass section-card">
-            <h3>📖 Book Metadata</h3>
-            <div className="form-grid-2">
-              <div className="form-group">
-                <label>Title</label>
-                <input type="text" className="input-field" value={bookTitle}
-                  onChange={e => setBookTitle(e.target.value)} placeholder="Book Title" />
-              </div>
-              <div className="form-group">
-                <label>Author</label>
-                <input type="text" className="input-field" value={author}
-                  onChange={e => setAuthor(e.target.value)} />
-              </div>
-              <div className="form-group">
-                <label>Publisher</label>
-                <input type="text" className="input-field" value={publisher}
-                  onChange={e => setPublisher(e.target.value)} />
-              </div>
-              <div className="form-group">
-                <label>Contact</label>
-                <input type="text" className="input-field" value={contact}
-                  onChange={e => setContact(e.target.value)} />
-              </div>
+        {/* ── LEFT PANEL ── */}
+        <aside className="left-panel">
+
+          {/* Metadata */}
+          <section className="glass card">
+            <h2 className="card-title">📖 Book Info</h2>
+            <div className="meta-grid">
+              {[
+                ["Title", bookTitle, setBookTitle],
+                ["Author", author, setAuthor],
+                ["Publisher", publisher, setPublisher],
+                ["Contact", contact, setContact],
+              ].map(([label, value, setter]) => (
+                <div className="field" key={label as string}>
+                  <label>{label as string}</label>
+                  <input className="input-field" type="text"
+                    value={value as string}
+                    onChange={(e) => (setter as (v: string) => void)(e.target.value)} />
+                </div>
+              ))}
             </div>
           </section>
 
           {/* Upload */}
-          <section className="glass section-card">
-            <h3>📂 Upload Manuscript</h3>
-            <div className="upload-dropzone">
-              <input type="file" id="file-upload" accept=".docx"
-                onChange={handleFileUpload} className="hidden-file-input" />
-              <label htmlFor="file-upload" className="dropzone-label">
-                <div className="upload-icon">📄</div>
+          <section className="glass card">
+            <h2 className="card-title">📂 Upload .docx</h2>
+            <div
+              className={`dropzone ${isDragging ? "drag-over" : ""} ${file ? "has-file" : ""}`}
+              onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+              onDragLeave={() => setIsDragging(false)}
+              onDrop={handleDrop}
+            >
+              <input id="file-input" type="file" accept=".docx"
+                onChange={handleFileInput} className="hidden" />
+              <label htmlFor="file-input" className="dropzone-inner">
+                <span className="drop-icon">{file ? "✅" : "📄"}</span>
                 {file
-                  ? <span className="file-name">{file.name}</span>
-                  : <span>Drop your <strong>.docx</strong> file here or click to browse</span>}
+                  ? <><strong className="file-name">{file.name}</strong><span className="file-sub">{totalWords.toLocaleString()} words · {chapters.length} chapters</span></>
+                  : <><span>Drop your <strong>.docx</strong> here</span><span className="file-sub">or click to browse</span></>
+                }
               </label>
             </div>
-
-            {rawText && (
-              <div className="split-config">
-                <div className="form-group">
-                  <label>Chapter Split Regex Pattern</label>
-                  <input type="text" className="input-field font-mono"
-                    value={splitPattern} onChange={handlePatternChange} />
-                  <small className="help-text">Uses lookahead to keep chapter titles in each chunk.</small>
-                </div>
-                <div className="presets-list">
-                  {[
-                    ["English / Korean Standard", "(?=^Chapter\\s+\\d+|^\\bChapter\\b\\s+[IVXLCDM]+|^제\\s*\\d+\\s*[장화])"],
-                    ["Markdown H1 (#)", "(?=^#[^#])"],
-                    ["ACT Split", "(?=^ACT\\s+\\d+)"],
-                  ].map(([label, pat]) => (
-                    <button key={label} className="badge-btn" onClick={() => {
-                      setSplitPattern(pat);
-                      splitManuscript(rawText, pat);
-                    }}>{label}</button>
-                  ))}
-                </div>
-              </div>
-            )}
           </section>
 
-          {/* Engine Operations */}
-          {chapters.length > 0 && (
-            <section className="glass section-card">
-              <h3>⚡ Engine Operations</h3>
-              {!isProcessing && completedCount < chapters.length && (
-                <button className="btn-primary full-width" onClick={startProcessingPipeline}>
-                  🚀 Start Relay Refinement
-                </button>
-              )}
-              {isProcessing && (
-                <div className="progress-container">
-                  <div className="progress-labels">
-                    <span>Progress: {progressPercent}%</span>
-                    <span>{formatSeconds(elapsedTime)}</span>
-                  </div>
-                  <div className="progress-bar-bg">
-                    <div className="progress-bar-fill" style={{ width: `${progressPercent}%` }} />
-                  </div>
-                  <p className="active-task-text">
-                    Processing: {chapters[currentChapterIndex]?.title || "Preparing..."}
-                  </p>
-                </div>
-              )}
-              {completedCount > 0 && !isProcessing && (
-                <div className="download-area">
-                  <div className="alert-box success">
-                    ✓ {completedCount}/{chapters.length} chapters refined.
-                  </div>
-                  <button className="btn-primary full-width" style={{ marginTop: "12px" }}
-                    onClick={handleDownloadEpub}>
-                    📥 Compile &amp; Download EPUB
+          {/* Split Config */}
+          {rawText && (
+            <section className="glass card">
+              <h2 className="card-title">✂️ Chapter Split</h2>
+              <div className="field">
+                <label>Regex Pattern</label>
+                <input className="input-field mono" type="text"
+                  value={splitPattern}
+                  onChange={(e) => handlePatternChange(e.target.value)} />
+                <small className="hint">Uses lookahead so chapter titles stay at the top of each chunk.</small>
+              </div>
+              <div className="presets">
+                {[
+                  ["Eng/Kor Standard", "(?=^Chapter\\s+\\d+|^\\bChapter\\b\\s+[IVXLCDM]+|^제\\s*\\d+\\s*[장화])"],
+                  ["Markdown H1", "(?=^#[^#])"],
+                  ["ACT split", "(?=^ACT\\s+\\d+)"],
+                  ["PART split", "(?=^PART\\s+\\d+)"],
+                ].map(([label, pat]) => (
+                  <button key={label as string} className="preset-pill"
+                    onClick={() => handlePatternChange(pat as string)}>
+                    {label as string}
                   </button>
-                </div>
-              )}
+                ))}
+              </div>
             </section>
           )}
 
-          {/* Logs */}
-          <section className="glass section-card">
-            <div className="console-header">
-              <h3>💻 Operation Logs</h3>
-              <button className="btn-clear-logs" onClick={() => setLogs([])}>Clear</button>
-            </div>
-            <div className="console-display">
-              {logs.length === 0
-                ? <p className="empty-logs">Ready. Upload a manuscript to begin.</p>
-                : logs.map((log, i) => (
-                  <div key={i} className={`log-line ${log.type}`}>
-                    <span className="log-time">[{log.time}]</span>
-                    <span className="log-text"> {log.text}</span>
-                  </div>
-                ))
-              }
-              <div ref={logEndRef} />
-            </div>
-          </section>
-        </div>
+          {/* Download */}
+          {chapters.length > 0 && (
+            <section className="glass card cta-card">
+              <div className="cta-info">
+                <span className="cta-stat">{chapters.length} chapters</span>
+                <span className="cta-dot">·</span>
+                <span className="cta-stat">{totalWords.toLocaleString()} words</span>
+              </div>
+              {status && <p className={`status-msg ${isBuilding ? "building" : ""}`}>{status}</p>}
+              <button className="btn-primary cta-btn" onClick={handleDownload} disabled={isBuilding}>
+                {isBuilding ? "Building…" : "📥 Download EPUB"}
+              </button>
+            </section>
+          )}
+        </aside>
 
-        {/* RIGHT COLUMN */}
-        <div className="preview-col">
-          {/* Chapters list */}
-          <section className="glass section-card chapters-list-card">
-            <h3>📑 Chapter List ({chapters.length})</h3>
-            {chapters.length === 0
-              ? <p className="empty-chapters">No chapters yet. Upload a manuscript.</p>
-              : (
-                <div className="chapters-grid">
-                  {chapters.map(ch => (
-                    <div
+        {/* ── RIGHT PANEL ── */}
+        <div className="right-panel">
+          {chapters.length === 0 ? (
+            <div className="glass card empty-state">
+              <span className="empty-icon">📚</span>
+              <h3>No manuscript loaded</h3>
+              <p>Upload a .docx file on the left to see a chapter preview here.</p>
+            </div>
+          ) : (
+            <>
+              <div className="glass card chapters-card">
+                <h2 className="card-title">📑 Chapters ({chapters.length})</h2>
+                <div className="chapters-list">
+                  {chapters.map((ch) => (
+                    <button
                       key={ch.id}
-                      className={`chapter-item ${ch.status} ${selectedPreviewChapter?.id === ch.id ? "active" : ""}`}
-                      onClick={() => setSelectedPreviewChapter(ch)}
+                      className={`chapter-row ${selectedChapter?.id === ch.id ? "active" : ""}`}
+                      onClick={() => setSelectedChapter(ch.id === selectedChapter?.id ? null : ch)}
                     >
-                      <div className="chapter-meta">
-                        <span className="chapter-num">#{ch.id}</span>
-                        <span className="chapter-words">
-                          {ch.originalText.split(/\s+/).length.toLocaleString()} w
-                        </span>
-                      </div>
-                      <h4 className="chapter-title-text">{ch.title}</h4>
-                      <div className="chapter-status-row">
-                        <span className="status-badge">{ch.status}</span>
-                      </div>
-                    </div>
+                      <span className="ch-num">#{ch.id}</span>
+                      <span className="ch-title">{ch.title}</span>
+                      <span className="ch-words">{ch.wordCount.toLocaleString()} w</span>
+                    </button>
                   ))}
                 </div>
-              )
-            }
-          </section>
+              </div>
 
-          {/* Chapter Preview */}
-          {selectedPreviewChapter && (
-            <section className="glass section-card">
-              <div className="preview-header">
-                <h3>🔍 {selectedPreviewChapter.title}</h3>
-                <button className="btn-close-preview" onClick={() => setSelectedPreviewChapter(null)}>✕ Close</button>
-              </div>
-              <div className="content-comparison">
-                <div className="comparison-pane">
-                  <h5>Original</h5>
-                  <div className="text-pane">{selectedPreviewChapter.originalText}</div>
-                </div>
-                <div className="comparison-pane">
-                  <h5>Refined</h5>
-                  <div className="text-pane refined-pane">
-                    {selectedPreviewChapter.refinedText
-                      ? selectedPreviewChapter.refinedText
-                      : <span className="placeholder-text">Pending refinement...</span>}
+              {selectedChapter && (
+                <div className="glass card preview-card">
+                  <div className="preview-head">
+                    <h2 className="card-title" style={{ marginBottom: 0 }}>{selectedChapter.title}</h2>
+                    <button className="btn-ghost sm" onClick={() => setSelectedChapter(null)}>✕</button>
                   </div>
+                  <div className="preview-text">{selectedChapter.content}</div>
                 </div>
-              </div>
-            </section>
+              )}
+            </>
           )}
         </div>
       </main>
 
-      {/* Settings Modal */}
-      {showSettings && (
-        <div className="modal-backdrop">
-          <div className="glass modal-card">
-            <h3>⚙️ Engine Configuration</h3>
-            <div className="modal-body">
-              <div className="form-group">
-                <label>Gemini API Key</label>
-                <input type="password" className="input-field" value={apiKey}
-                  onChange={e => setApiKey(e.target.value)}
-                  placeholder={process.env.GEMINI_API_KEY ? "Using server env key" : "Paste your API key"} />
-                <small className="help-text">Saved in browser localStorage. Never sent to third parties.</small>
-              </div>
-              <div className="form-group">
-                <label>Model</label>
-                <select className="input-field" value={modelName} onChange={e => setModelName(e.target.value)}>
-                  <option value="gemini-2.0-flash">Gemini 2.0 Flash (Recommended)</option>
-                  <option value="gemini-2.0-flash-lite">Gemini 2.0 Flash Lite (Fastest)</option>
-                  <option value="gemini-2.5-flash">Gemini 2.5 Flash (Most capable)</option>
-                </select>
-              </div>
-              <div className="form-group">
-                <label>Editorial Instructions</label>
-                <textarea className="input-field" rows={4} value={customPrompt}
-                  onChange={e => setCustomPrompt(e.target.value)} />
-              </div>
-              <div className="form-group">
-                <label>Chapter Delay: {chapterDelay}s</label>
-                <input type="range" min={0} max={60} step={2} value={chapterDelay}
-                  onChange={e => setChapterDelay(Number(e.target.value))}
-                  style={{ width: "100%", accentColor: "var(--primary)" }} />
-                <small className="help-text">Wait between chapters to respect free-tier rate limits. Recommended: 8–15s.</small>
-              </div>
-            </div>
-            <div className="modal-footer">
-              <button className="btn-secondary" onClick={() => setShowSettings(false)}>Cancel</button>
-              <button className="btn-primary" onClick={handleSaveSettings}>Save</button>
-            </div>
-          </div>
-        </div>
-      )}
-
       <style jsx>{`
-        .dashboard-layout {
-          min-height: 100vh;
-          display: flex;
-          flex-direction: column;
-          padding-bottom: 60px;
+        .app { min-height: 100vh; display: flex; flex-direction: column; padding-bottom: 60px; }
+
+        /* Topbar */
+        .topbar { border-radius: 0; border-top: none; border-left: none; border-right: none; position: sticky; top: 0; z-index: 50; }
+        .topbar-inner { height: 64px; display: flex; align-items: center; justify-content: space-between; }
+        .topbar-brand { display: flex; align-items: center; gap: 10px; }
+        .topbar-title { font-size: 17px; font-weight: 700; letter-spacing: -0.3px; }
+        .badge { display: inline-block; background: linear-gradient(135deg, var(--primary), var(--secondary)); color: #050508; font-size: 10px; font-weight: 800; letter-spacing: 1px; text-transform: uppercase; padding: 3px 8px; border-radius: 999px; }
+        .badge.sm { font-size: 9px; padding: 2px 7px; }
+
+        /* Layout */
+        .inner { max-width: 1200px; width: 100%; margin: 0 auto; padding: 0 24px; }
+        .main-grid { display: grid; grid-template-columns: 400px 1fr; gap: 28px; margin-top: 32px; }
+        @media (max-width: 900px) { .main-grid { grid-template-columns: 1fr; } }
+        .left-panel, .right-panel { display: flex; flex-direction: column; gap: 20px; }
+
+        /* Cards */
+        .card { padding: 22px; }
+        .card-title {
+          font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .4px;
+          color: var(--foreground-muted); margin-bottom: 16px;
+          border-bottom: 1px solid rgba(255,255,255,.05); padding-bottom: 8px;
         }
-        .header-bar {
-          border-radius: 0;
-          border-top: none; border-left: none; border-right: none;
-          position: sticky; top: 0; z-index: 50;
+
+        /* Metadata form */
+        .meta-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+        .field { display: flex; flex-direction: column; gap: 5px; }
+        label { font-size: 11px; font-weight: 600; color: var(--foreground-muted); text-transform: uppercase; letter-spacing: .5px; }
+        .hint { font-size: 11px; color: var(--foreground-muted); margin-top: 4px; }
+
+        /* Dropzone */
+        .dropzone {
+          border: 2px dashed rgba(255,255,255,.1); border-radius: 12px;
+          transition: all .2s; cursor: pointer;
         }
-        .header-content {
-          height: 70px; display: flex; align-items: center; justify-content: space-between;
+        .dropzone:hover, .dropzone.drag-over { border-color: var(--primary); background: rgba(0,242,254,.03); }
+        .dropzone.has-file { border-color: rgba(0,242,254,.3); border-style: solid; }
+        .hidden { display: none; }
+        .dropzone-inner {
+          display: flex; flex-direction: column; align-items: center; justify-content: center;
+          padding: 32px 20px; text-align: center; gap: 6px; cursor: pointer;
+          font-size: 14px; color: var(--foreground-muted);
         }
-        .brand-logo { display: flex; align-items: center; gap: 12px; }
-        .logo-badge {
-          background: linear-gradient(135deg, var(--primary) 0%, var(--secondary) 100%);
-          color: #050508; font-size: 10px; font-weight: 800; padding: 3px 8px;
-          border-radius: 9999px; text-transform: uppercase; letter-spacing: 0.5px;
-        }
-        h2 { font-size: 18px; font-weight: 700; letter-spacing: -0.3px; }
-        .header-actions { display: flex; gap: 12px; }
-        .main-content {
-          margin-top: 32px;
-          display: grid;
-          grid-template-columns: 460px 1fr;
-          gap: 28px;
-        }
-        @media (max-width: 1024px) { .main-content { grid-template-columns: 1fr; } }
-        .control-col, .preview-col { display: flex; flex-direction: column; gap: 24px; }
-        .section-card { padding: 24px; }
-        h3 {
-          font-size: 13px; font-weight: 600; margin-bottom: 18px;
-          letter-spacing: 0.3px; text-transform: uppercase;
-          color: var(--foreground-muted);
-          border-bottom: 1px solid rgba(255,255,255,0.05);
-          padding-bottom: 8px;
-        }
-        .form-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-        .form-group { display: flex; flex-direction: column; gap: 6px; }
-        .form-group label {
-          font-size: 11px; font-weight: 600; color: var(--foreground-muted);
-          text-transform: uppercase; letter-spacing: 0.5px;
-        }
-        .help-text { font-size: 11px; color: var(--foreground-muted); margin-top: 4px; }
-        .upload-dropzone {
-          border: 2px dashed rgba(255,255,255,0.1); border-radius: 12px;
-          background: rgba(255,255,255,0.01); transition: all var(--transition-fast); cursor: pointer;
-        }
-        .upload-dropzone:hover { border-color: var(--primary); background: rgba(0,242,254,0.02); }
-        .hidden-file-input { display: none; }
-        .dropzone-label {
-          display: flex; flex-direction: column; align-items: center;
-          justify-content: center; padding: 40px 24px; text-align: center;
-          cursor: pointer; font-size: 14px; color: var(--foreground-muted);
-        }
-        .upload-icon { font-size: 32px; margin-bottom: 12px; }
-        .file-name { color: var(--primary); font-weight: 600; }
-        .split-config { margin-top: 20px; display: flex; flex-direction: column; gap: 12px; }
-        .presets-list { display: flex; flex-wrap: wrap; gap: 8px; }
-        .badge-btn {
-          background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08);
+        .drop-icon { font-size: 28px; margin-bottom: 4px; }
+        .file-name { color: var(--primary); font-size: 13px; }
+        .file-sub { font-size: 12px; color: var(--foreground-muted); }
+
+        /* Presets */
+        .presets { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 10px; }
+        .preset-pill {
+          background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.08);
           color: var(--foreground-muted); font-size: 11px; padding: 4px 10px;
-          border-radius: 9999px; cursor: pointer; transition: all var(--transition-fast);
+          border-radius: 999px; cursor: pointer; transition: all .15s;
         }
-        .badge-btn:hover { background: rgba(255,255,255,0.08); color: var(--foreground); border-color: var(--primary); }
-        .full-width { width: 100%; }
-        .progress-container { display: flex; flex-direction: column; gap: 12px; }
-        .progress-labels { display: flex; justify-content: space-between; font-size: 13px; font-weight: 600; }
-        .progress-bar-bg { height: 8px; background: rgba(255,255,255,0.05); border-radius: 9999px; overflow: hidden; }
-        .progress-bar-fill {
-          height: 100%;
-          background: linear-gradient(90deg, var(--primary) 0%, var(--secondary) 100%);
-          border-radius: 9999px; transition: width 0.3s ease;
+        .preset-pill:hover { background: rgba(0,242,254,.08); border-color: var(--primary); color: var(--foreground); }
+        .mono { font-family: monospace; font-size: 12px; }
+
+        /* CTA card */
+        .cta-card { display: flex; flex-direction: column; gap: 12px; }
+        .cta-info { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--foreground-muted); }
+        .cta-stat { font-weight: 600; color: var(--foreground); }
+        .cta-dot { color: var(--foreground-muted); }
+        .cta-btn { width: 100%; font-size: 15px; padding: 14px; }
+        .status-msg { font-size: 12px; color: var(--foreground-muted); text-align: center; }
+        .status-msg.building { color: var(--primary); }
+
+        /* Chapters list */
+        .chapters-card { flex-grow: 1; }
+        .chapters-list { display: flex; flex-direction: column; gap: 4px; max-height: 460px; overflow-y: auto; padding-right: 4px; }
+        .chapter-row {
+          display: grid; grid-template-columns: 36px 1fr auto; align-items: center;
+          gap: 10px; padding: 10px 12px; border-radius: 8px; cursor: pointer;
+          background: rgba(255,255,255,.02); border: 1px solid transparent;
+          text-align: left; transition: all .15s; width: 100%;
         }
-        .active-task-text { font-size: 12px; color: var(--primary); font-weight: 500; }
-        .alert-box.success {
-          background: rgba(16,185,129,0.06); border: 1px solid rgba(16,185,129,0.15);
-          color: var(--success); padding: 12px 16px; border-radius: 8px; font-size: 13px;
+        .chapter-row:hover { background: rgba(255,255,255,.05); border-color: rgba(255,255,255,.08); }
+        .chapter-row.active { background: rgba(0,242,254,.05); border-color: rgba(0,242,254,.25); }
+        .ch-num { font-size: 11px; font-weight: 700; color: var(--primary); }
+        .ch-title { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .ch-words { font-size: 11px; color: var(--foreground-muted); white-space: nowrap; }
+
+        /* Preview */
+        .preview-card { margin-top: 0; }
+        .preview-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }
+        .preview-text {
+          font-family: Georgia, serif; font-size: 14px; line-height: 1.75;
+          white-space: pre-wrap; max-height: 520px; overflow-y: auto;
+          background: rgba(0,0,0,.25); border: 1px solid rgba(255,255,255,.04);
+          border-radius: 8px; padding: 20px; color: #d4d8e3;
         }
-        .console-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
-        .console-header h3 { margin-bottom: 0; border-bottom: none; padding-bottom: 0; }
-        .btn-clear-logs {
-          background: transparent; border: none; color: var(--foreground-muted);
-          font-size: 11px; cursor: pointer; text-transform: uppercase; letter-spacing: 0.5px;
+
+        /* Empty state */
+        .empty-state {
+          display: flex; flex-direction: column; align-items: center; justify-content: center;
+          text-align: center; padding: 80px 40px; gap: 12px;
         }
-        .btn-clear-logs:hover { color: var(--foreground); }
-        .console-display {
-          background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.04);
-          border-radius: 8px; padding: 14px; font-family: monospace; font-size: 12px;
-          height: 260px; overflow-y: auto; display: flex; flex-direction: column; gap: 5px;
+        .empty-icon { font-size: 48px; }
+        .empty-state h3 { font-size: 18px; font-weight: 600; }
+        .empty-state p { color: var(--foreground-muted); font-size: 14px; max-width: 280px; }
+
+        /* Utility buttons */
+        .btn-ghost {
+          background: transparent; border: 1px solid rgba(255,255,255,.08);
+          color: var(--foreground-muted); font-size: 13px; padding: 7px 14px;
+          border-radius: 7px; cursor: pointer; transition: all .15s;
         }
-        .empty-logs { color: rgba(255,255,255,0.2); text-align: center; margin-top: 100px; }
-        .log-time { color: var(--foreground-muted); }
-        .log-line.info  { color: #cbd5e1; }
-        .log-line.success { color: #4ade80; }
-        .log-line.warning { color: #facc15; }
-        .log-line.error { color: #f87171; }
-        .chapters-list-card { flex-grow: 1; }
-        .empty-chapters { text-align: center; padding: 40px; color: var(--foreground-muted); font-size: 13px; }
-        .chapters-grid {
-          display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
-          gap: 12px; max-height: 420px; overflow-y: auto; padding-right: 4px;
-        }
-        .chapter-item {
-          background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);
-          border-radius: 8px; padding: 12px; cursor: pointer;
-          transition: all var(--transition-fast);
-          display: flex; flex-direction: column; gap: 6px;
-        }
-        .chapter-item:hover { background: rgba(255,255,255,0.04); border-color: var(--primary); }
-        .chapter-item.active {
-          background: rgba(0,242,254,0.04); border-color: var(--primary);
-          box-shadow: 0 0 10px rgba(0,242,254,0.1);
-        }
-        .chapter-meta { display: flex; justify-content: space-between; font-size: 10px; color: var(--foreground-muted); }
-        .chapter-num { font-weight: bold; color: var(--primary); }
-        .chapter-title-text {
-          font-size: 12px; font-weight: 600; white-space: nowrap;
-          overflow: hidden; text-overflow: ellipsis;
-        }
-        .chapter-status-row { font-size: 9px; margin-top: auto; }
-        .status-badge { text-transform: uppercase; font-weight: 700; }
-        .pending .status-badge { color: var(--foreground-muted); }
-        .processing .status-badge { color: var(--secondary); }
-        .completed .status-badge { color: var(--success); }
-        .failed .status-badge { color: var(--danger); }
-        .preview-header {
-          display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;
-        }
-        .preview-header h3 { margin-bottom: 0; border-bottom: none; padding-bottom: 0; }
-        .btn-close-preview {
-          background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);
-          color: var(--foreground); font-size: 11px; padding: 4px 12px;
-          border-radius: 6px; cursor: pointer;
-        }
-        .btn-close-preview:hover { background: rgba(255,255,255,0.1); }
-        .content-comparison { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
-        @media (max-width: 768px) { .content-comparison { grid-template-columns: 1fr; } }
-        .comparison-pane { display: flex; flex-direction: column; gap: 8px; }
-        .comparison-pane h5 {
-          font-size: 11px; color: var(--foreground-muted); text-transform: uppercase; letter-spacing: 0.5px;
-        }
-        .text-pane {
-          background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.04);
-          border-radius: 8px; padding: 16px; font-size: 13px; line-height: 1.6;
-          max-height: 400px; overflow-y: auto; white-space: pre-wrap;
-          font-family: Georgia, serif;
-        }
-        .refined-pane { border-color: rgba(0,242,254,0.1); }
-        .placeholder-text { color: var(--foreground-muted); font-style: italic; }
-        .modal-backdrop {
-          position: fixed; inset: 0; background: rgba(0,0,0,0.7);
-          backdrop-filter: blur(8px); display: flex; align-items: center;
-          justify-content: center; z-index: 100; padding: 24px;
-        }
-        .modal-card { max-width: 500px; width: 100%; padding: 28px; }
-        .modal-card h3 { margin-bottom: 20px; }
-        .modal-body { display: flex; flex-direction: column; gap: 16px; margin-bottom: 24px; }
-        .modal-footer { display: flex; justify-content: flex-end; gap: 12px; }
+        .btn-ghost:hover { background: rgba(255,255,255,.06); color: var(--foreground); }
+        .btn-ghost.sm { font-size: 12px; padding: 4px 10px; }
       `}</style>
     </div>
   );
