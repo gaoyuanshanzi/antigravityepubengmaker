@@ -33,6 +33,7 @@ export default function Home() {
   // App settings state
   const [apiKey, setApiKey] = useState("");
   const [modelName, setModelName] = useState("gemini-2.0-flash");
+  const [chapterDelay, setChapterDelay] = useState(8);
   const [customPrompt, setCustomPrompt] = useState(
     "Ensure grammar, style, and tone are polished. Adjust sentence flow to feel professional yet captivating. Retain specific formatting like line breaks or indentations if relevant."
   );
@@ -318,6 +319,14 @@ export default function Home() {
     });
   };
 
+  // Countdown sleep helper with live log
+  const countdownSleep = async (seconds: number, reason: string) => {
+    for (let s = seconds; s > 0; s--) {
+      addLog(`⏳ ${reason} — resuming in ${s}s...`, "warning");
+      await new Promise(r => setTimeout(r, 1000));
+    }
+  };
+
   // Run the processing pipeline sequential loop
   const startProcessingPipeline = async () => {
     if (chapters.length === 0) {
@@ -394,69 +403,97 @@ export default function Home() {
       updatedChapters[i] = { ...ch, status: "processing" };
       setChapters([...updatedChapters]);
 
-      try {
-        // Send chapter text to api
-        const res = await fetch("/api/refine", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            chapterText: ch.originalText,
-            chapterIndex: i + 1,
-            totalChapters: updatedChapters.length,
-            previousSummary,
-            customPrompt,
-            apiKey,
-            modelName
-          })
-        });
+      // 429-aware retry loop for each chapter
+      let chapterSuccess = false;
+      let retryCount = 0;
+      const maxClientRetries = 4;
 
-        if (!res.ok) {
-          const errData = await res.json();
-          throw new Error(errData.error || `HTTP error ${res.status}`);
-        }
+      while (!chapterSuccess && retryCount <= maxClientRetries) {
+        try {
+          const res = await fetch("/api/refine", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              chapterText: ch.originalText,
+              chapterIndex: i + 1,
+              totalChapters: updatedChapters.length,
+              previousSummary,
+              customPrompt,
+              apiKey,
+              modelName
+            })
+          });
 
-        const data = await res.json();
-        
-        // Update summary context
-        previousSummary = data.summary || previousSummary;
-        
-        updatedChapters[i].refinedText = data.refinedText;
-        updatedChapters[i].summary = data.summary;
-        updatedChapters[i].illustrationPrompt = data.illustrationPrompt;
-        
-        addLog(`[Chapter ${i + 1}/${updatedChapters.length}] Refinement complete. Summary: "${data.summary?.substring(0, 80)}..."`, "success");
-
-        // Generate chapter illustration
-        if (data.illustrationPrompt) {
-          addLog(`[Chapter ${i + 1}/${updatedChapters.length}] Generating illustration for prompt: "${data.illustrationPrompt.substring(0, 80)}..."`, "info");
-          const chPrompt = `${data.illustrationPrompt}, ${illustrationStyle}`;
-          const illustrationUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(chPrompt)}?width=800&height=600&nologo=true&seed=${Math.floor(Math.random() * 1000000)}`;
-          
-          updatedChapters[i].illustrationUrl = illustrationUrl;
-          
-          // Prefetch blob
-          const blob = await fetchImageBlob(illustrationUrl);
-          if (blob) {
-            updatedChapters[i].illustrationBlob = blob;
-            addLog(`[Chapter ${i + 1}/${updatedChapters.length}] Illustration cached successfully.`, "success");
-          } else {
-            addLog(`[Chapter ${i + 1}/${updatedChapters.length}] Failed to download illustration blob (will retry on EPUB compile).`, "warning");
+          if (res.status === 429) {
+            const errData = await res.json().catch(() => ({}));
+            const waitSec = 30 * Math.pow(2, retryCount); // 30s, 60s, 120s, 240s
+            addLog(`[Chapter ${i + 1}] ⚠️ Quota exceeded (429). Auto-retry ${retryCount + 1}/${maxClientRetries}.`, "warning");
+            await countdownSleep(waitSec, `Rate limit — waiting for Gemini quota reset`);
+            retryCount++;
+            continue;
           }
+
+          if (!res.ok) {
+            const errData = await res.json();
+            throw new Error(errData.error || `HTTP error ${res.status}`);
+          }
+
+          const data = await res.json();
+
+          // Update summary context
+          previousSummary = data.summary || previousSummary;
+
+          updatedChapters[i].refinedText = data.refinedText;
+          updatedChapters[i].summary = data.summary;
+          updatedChapters[i].illustrationPrompt = data.illustrationPrompt;
+
+          addLog(`[Chapter ${i + 1}/${updatedChapters.length}] Refinement complete. Summary: "${data.summary?.substring(0, 80)}..."`, "success");
+
+          // Generate chapter illustration
+          if (data.illustrationPrompt) {
+            addLog(`[Chapter ${i + 1}/${updatedChapters.length}] Generating illustration for prompt: "${data.illustrationPrompt.substring(0, 80)}..."`, "info");
+            const chPrompt = `${data.illustrationPrompt}, ${illustrationStyle}`;
+            const illustrationUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(chPrompt)}?width=800&height=600&nologo=true&seed=${Math.floor(Math.random() * 1000000)}`;
+
+            updatedChapters[i].illustrationUrl = illustrationUrl;
+
+            // Prefetch blob
+            const blob = await fetchImageBlob(illustrationUrl);
+            if (blob) {
+              updatedChapters[i].illustrationBlob = blob;
+              addLog(`[Chapter ${i + 1}/${updatedChapters.length}] Illustration cached successfully.`, "success");
+            } else {
+              addLog(`[Chapter ${i + 1}/${updatedChapters.length}] Failed to download illustration blob (will retry on EPUB compile).`, "warning");
+            }
+          }
+
+          updatedChapters[i].status = "completed";
+          setChapters([...updatedChapters]);
+          chapterSuccess = true;
+
+        } catch (err: any) {
+          console.error(err);
+          updatedChapters[i].status = "failed";
+          setChapters([...updatedChapters]);
+          addLog(`[Chapter ${i + 1}] Processing failed: ${err.message}`, "error");
+          addLog("Sequential pipeline halted due to error. Please resolve and resume.", "error");
+          setIsProcessing(false);
+          return;
         }
+      }
 
-        updatedChapters[i].status = "completed";
-        setChapters([...updatedChapters]);
-
-      } catch (err: any) {
-        console.error(err);
+      if (!chapterSuccess) {
         updatedChapters[i].status = "failed";
         setChapters([...updatedChapters]);
-        addLog(`[Chapter ${i + 1}] Processing failed: ${err.message}`, "error");
-        
-        // Stop sequential execution on error to preserve integrity
-        addLog("Sequential pipeline halted due to error. Please resolve and resume.", "error");
+        addLog(`[Chapter ${i + 1}] Exhausted all retries. Pipeline halted.`, "error");
         setIsProcessing(false);
         return;
+      }
+
+      // Delay between chapters to respect free-tier rate limits
+      if (i < updatedChapters.length - 1 && chapterDelay > 0) {
+        addLog(`⏸️ Waiting ${chapterDelay}s before next chapter to respect API rate limits...`, "info");
+        await new Promise(r => setTimeout(r, chapterDelay * 1000));
       }
     }
 
@@ -977,6 +1014,22 @@ export default function Home() {
                 />
                 <small className="help-text">
                   Appended to chapter prompts to ensure styling consistency.
+                </small>
+              </div>
+
+              <div className="form-group">
+                <label>Chapter Delay (seconds): {chapterDelay}s</label>
+                <input
+                  type="range"
+                  min={0}
+                  max={60}
+                  step={2}
+                  value={chapterDelay}
+                  onChange={e => setChapterDelay(Number(e.target.value))}
+                  style={{ width: "100%", accentColor: "var(--primary)" }}
+                />
+                <small className="help-text">
+                  Wait time between chapters to avoid free-tier rate limits (429 errors). Recommended: 8–15s for free accounts.
                 </small>
               </div>
             </div>
