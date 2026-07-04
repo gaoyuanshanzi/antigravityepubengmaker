@@ -32,7 +32,7 @@ export default function Home() {
 
   // App settings state
   const [apiKey, setApiKey] = useState("");
-  const [modelName, setModelName] = useState("gemini-1.5-flash");
+  const [modelName, setModelName] = useState("gemini-2.0-flash");
   const [customPrompt, setCustomPrompt] = useState(
     "Ensure grammar, style, and tone are polished. Adjust sentence flow to feel professional yet captivating. Retain specific formatting like line breaks or indentations if relevant."
   );
@@ -951,8 +951,9 @@ export default function Home() {
               <div className="form-group">
                 <label>Model Selector</label>
                 <select className="input-field" value={modelName} onChange={e => setModelName(e.target.value)}>
-                  <option value="gemini-1.5-flash">Gemini 1.5 Flash (Fast, Recommended)</option>
-                  <option value="gemini-1.5-pro">Gemini 1.5 Pro (Extremely precise, slower)</option>
+                  <option value="gemini-2.0-flash">Gemini 2.0 Flash (Fast, Recommended)</option>
+                  <option value="gemini-2.0-flash-lite">Gemini 2.0 Flash Lite (Fastest, Lightest)</option>
+                  <option value="gemini-2.5-flash">Gemini 2.5 Flash (Most capable, slower)</option>
                 </select>
               </div>
 
